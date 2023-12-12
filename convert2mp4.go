@@ -11,12 +11,8 @@ import (
 	"time"
 )
 
-func convertWebmToMp4(inputPath, outputPath string) (err error) {
-	cmd := exec.Command("ffmpeg", "-i", inputPath, outputPath)
-	return cmd.Run()
-}
-
 func deleteOldUploadedFiles(uploadDir string) {
+	time.Sleep(time.Hour)
 	// Get the current time
 	now := time.Now()
 
@@ -50,59 +46,95 @@ func deleteOldUploadedFiles(uploadDir string) {
 			}
 		}
 	}
+	go deleteOldUploadedFiles(uploadDir)
 }
 
 func main() {
-	uploadDir := "/data"
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		log.Fatalf("Failed to create upload directory: %v", err)
+	//uploadDir := "/data"
+	uploadDir := os.Getenv("VideoCache")
+	if uploadDir == "" {
+		uploadDir = "/Users/yang/video"
+	}
+	log.Printf("\"VideoCache\" directory from environment variable: %s, current: %s", os.Getenv("VideoCache"), uploadDir)
+
+	//err if the directory does not exist
+	if _, err := os.Stat(uploadDir); os.IsNotExist(err) {
+		//try to create the directory
+		err = os.Mkdir(uploadDir, 0755)
+		if err != nil {
+			log.Fatalf("Failed to create upload directory: %v", err)
+			return
+		}
+		log.Printf("Created upload directory: %s", uploadDir)
+	} else {
+		log.Printf("Upload directory existed: %s", uploadDir)
 	}
 
 	// Call the deleteOldUploadedFiles routine periodically
-	go func() {
-		for {
-			deleteOldUploadedFiles(uploadDir)
-			time.Sleep(24 * time.Hour) // Run once every 24 hours
-		}
-	}()
+	go deleteOldUploadedFiles(uploadDir)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			file, _, err := r.FormFile("file")
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			defer file.Close()
-
-			// Save the uploaded file to a temporary location
-			tempFile, err := os.CreateTemp(uploadDir, "uploaded-file-*.webm")
-			fullNameWithPath := tempFile.Name()
-			if err != nil {
-				log.Fatalf("Failed to create temporary file: %v", err)
-			}
-			defer tempFile.Close()
-
-			// Copy the uploaded file to the temporary file
-			_, err = io.Copy(tempFile, file)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			tempFile.Close()
-
-			outputPath := fmt.Sprintf("%s/%v.mp4", uploadDir, time.Now().UnixNano())
-			if err = convertWebmToMp4(fullNameWithPath, outputPath); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			// Serve the converted mp4 file for download
-			http.ServeFile(w, r, outputPath)
-		} else {
+		var (
+			mp4       []byte
+			paramName string
+		)
+		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if paramName = r.URL.Query().Get("name"); paramName == "" {
+			log.Printf("parameter name is required but missing")
+			http.Error(w, "parameter name is required but missing", http.StatusBadRequest)
+			return
+		}
+
+		// Save the uploaded file to a temporary location
+		tempFile, err := os.CreateTemp(uploadDir, fmt.Sprintf("uploaded-file-%s.webm", paramName))
+		inputPath := tempFile.Name()
+		if err != nil {
+			log.Fatalf("Failed to create temporary file: %v", err)
+		}
+		defer tempFile.Close()
+		defer os.Remove(inputPath)
+
+		// Copy the posted to the temporary file
+		_, err = io.Copy(tempFile, r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		tempFile.Close()
+
+		outputPath := fmt.Sprintf("%s/mp4-%s.mp4", uploadDir, paramName)
+		//ffmpeg -i /Users/yang/video/uploaded-file-退休规划\:确保金融安全的退休生 活.webm2812214445  -c:v libx265 -c:v hevc_videotoolbox /Users/yang/video/o.mp4
+		//cmd := exec.Command("ffmpeg", "-i", inputPath, "-c:v", "libx265", "-c:v", "hevc_videotoolbox", outputPath)
+		cmd := exec.Command("ffmpeg", "-i", inputPath, outputPath)
+		if err = cmd.Run(); err != nil {
+			log.Printf("Failed to convert video: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(outputPath)
+
+		// Serve the converted mp4 file for download
+		//write back the mp4 file converted
+		if mp4, err = os.ReadFile(outputPath); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		} else if len(mp4) == 0 {
+			http.Error(w, "Empty mp4 file", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Disposition", "attachment; filename=video.mp4")
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(mp4)))
+		if _, err = w.Write(mp4); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 	})
+	//open the port 8001
+	log.Printf("Listening on port 8001")
+	log.Fatal(http.ListenAndServe(":8001", nil))
 
-	log.Fatal(http.ListenAndServe(":80", nil))
 }
